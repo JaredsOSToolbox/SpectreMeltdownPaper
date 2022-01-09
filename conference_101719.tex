@@ -1,0 +1,226 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+%\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage[listings,skins]{tcolorbox}
+
+\usepackage [autostyle, english = american]{csquotes}
+\MakeOuterQuote{"}
+
+
+\usepackage[style=ieee,natbib]{biblatex}
+\addbibresource{sources.bib}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Spectre and Meltdown Analysis}
+
+\author{\IEEEauthorblockN{Jared Dyreson}
+\IEEEauthorblockA{\textit{Engineering \& Computer Science} \\
+\textit{California State University Fullerton}\\
+Fullerton, United States \\
+jareddyreson@csu.fullerton.edu}
+}
+
+\maketitle
+
+\begin{abstract}
+This document is an overview of the Spectre and Meltdown hardware vulnerabilities found in modern CPUs through the advent of branch prediction.
+Instructions can be loaded and executed ahead of the current instruction based on previous instructions.
+If these predictions are incorrect, the CPU will roll back to a save state it set before attempting this branch execution.
+Speculative analysis however, holds a fatal flaw as it does not abide by the same regulations as normal instruction execution does.
+This leads to potential memory leaks during the execution of specially crafted payloads.
+Spectre attacks specifically attempt to train the CPU allow certain variables to not be checked during runtime, allowing for bypassing of bound checks.
+Meltdown exploits on the other hand, will try to execute instructions out of order and try to bypass memory protections on speculatively executed instructions.
+Other avenues of exploitation can reside in return oriented programming, which attempts to mark portions of the stack as executable, leading to arbitrary code execution.
+\end{abstract}
+
+\section{Introduction}
+
+Methods of exploiting systems using "many physical effects such as power consumption, electromagnetic radiation, or acoustic noise" \autocite[1]{SpectreAttacksExploiting} have been around for a long time.
+These attacks generally prey on oversights in architecture design of the hardware itself.
+In recent years, there has been a shift from exploiting hardware to using software to leverage attacks.
+Common techniques used before include buffer overflows, which would override portions of the stack to achieve arbitrary code execution.
+These avenues have been hardened by stack canaries and compiler warnings when using unsafe system calls such as strcpy and strcat.
+More sophisticated attacks have been exploiting components in the Linux Kernel, such as the JIT (just-in-time) compiler and the eBPF  (extended Berkeley Packet Filter).
+Other microarchitectural components on the system can also be used in attacks, such as the CPU cache and cache lines.
+The aforementioned vectors are utilized in Spectre and Meltdown exploits, in conjunction with other side-channel buffers.
+
+\section{CPU Cache}
+
+In performing calculations, it is important for the CPU to have an external memory bank to retrieve instructions and data that it wishes to reuse.
+Data that is no longer needed is removed using several different algorithms, such as LRU (least recently used) and FIFO (First In First Out).
+Implementation of these replacement algorithms are done directly in the hardware and vary in their effectiveness.
+The caches reside close to or inside the CPU itself, leading to quick and easy access.
+Since data is stored here, this is one possible place where data can be leaked, as it does not need to be fetched from main memory.
+Attackers can "measure the time it takes to perform a memory read", and in doing so can pinpoint where data is stored \autocite[4]{SpectreAttacksExploiting}.
+Then, with this knowledge, they can craft a payload that can influence the state of the cache and allow for the reading of a specific piece of data.
+Speculative code execution can allow for unprivileged processes to read these segments of data, as these restrictions are not enforced during this time.
+
+
+\section{Exploitation Techniques}
+
+There are two main instances where Spectre can be used; conditional and unconditional branches.
+Both methodologies differ in their initial and intermediate steps but still achieve the same result.
+
+\subsection{Conditional Branches}
+
+Conditional branches are exploited by mis-training the CPU into thinking some series of instructions is safe.
+In the white paper "Spectre Attacks: Exploiting Speculative Execution", the approach used was having a variable be cleared for use in indexing an array.
+\begin{lstlisting}[frame=single]
+if(x < array1_size)
+    y = array2[array1[x] * 4096]
+\end{lstlisting}
+Here, the attacker is setting up a vulnerable state for the cache and in speculative execution.
+It is important to note that "changes made to the cache state are not reverted" \autocite[2]{SpectreAttacksExploiting}.
+The CPU first does a conditional check if the variable is less than the size of the array.
+Since the size is not in the cache, the CPU needs to fetch the address from main memory.
+While waiting for the variable 'x' to be retrieved, the CPU will now speculate what the address should be for the indexing of array2.
+As noted above, array2 has not been loaded into the cache and needs to be read into the cache.
+In the process of retrieving the second bit of information, the original condition may be deemed as false, telling the CPU that this branch is incorrect.
+However, since the CPU fetched for the block of memory, it now resides in the cache.
+A side-channel attack like Flush+Reload, which "detects whether a specific memory location is cached" can be deployed to lead this piece of data \autocite[5]{MeltdownAnalysis}.
+The authors of this paper call these instructions \emph{transient}, as they revert the CPU back to its original state but leave trace elements \autocite{SpectreAttacksExploiting}.
+
+\subsection{Unconditional Branches}
+
+Variants that utilize unconditional branches attempt to lead the CPU down a path that will expose certain regions of memory.
+Most of these paths would not "occur during legitimate program execution" \autocite[8]{SpectreAttacksExploiting} and do not require the leveraging of branch instructions.
+ROP gadgets littered throughout the victims memory can be used as springboards for luring the CPU.
+Before continuing, it is important to define what exactly a ROP gadget is.
+Gadgets can be classified as any sequence of instructions that have a following return instruction.
+Since most programs are dynamically linked, there is also plenty of space for functions and gadgets to reside that would allow for the offloading of sensitive data.
+Attacks generally use two registers to capture this leaked data, one containing an address to the data targeted and another to offload that has already been loaded in.
+These are particulary of use if the attacker knows which registers will be used.
+\begin{lstlisting}[frame=single]
+; Code written by Jared Dyreson
+mov rdi,printf_format
+mov rsi,0x404000
+xor rax,rax
+call printf
+\end{lstlisting}
+In this example, we know that rsi will be loaded with the hex value of 0x404000.
+Theoretically, an attacker can use misdirection to eventually reveal the value of rsi and export it via side channels.
+
+\section{JIT and eBPF}
+
+The JIT compiler bridges the gap for interpreted languages such as Java and C\#, which can theoretically be run on any CPU architecture.
+Machine instructions are generated during runtime and there is no assembling/linking stage.
+More traditional compilers, such as AOT (ahead of time), do all of this during compilation for the architecture of the host machine.
+Generally, code produced by the JIT compiler can come in a variety of "temperatures" and each level is associated with how optimized the code is.
+These are; cold, warm, hot, very hot and scorching.
+The compiler can gauge how often a set of instructions is being called  by sampling the stack frame.
+Also, functions can be deescalated to "cold, to further improve startup time" \autocite{gillis_2019}.
+The eBPF can be seen as an extension of JIT compilers, as they allow dynamic loading of sandbox environments in kernel space.
+These environments can be used "without changing kernel source code or loading kernel modules" \autocite{EBPF}.
+In this intermediate layer resides both a verifier and JIT compiler.
+To ensure the process has the correct permissions to run bytecode, the eBPF checks the privileges of the process.
+Also, the verifier attempts to spot programs that hang in an infinite loop and will block them from executing.
+
+
+\section{JIT Mitigations}
+
+    Attacks using Javascript have been used as PoC (proof of concept), which can lead to concerns of code execution in the browser utilizing Spectre and Meltdown.
+Users on Reddit had made patches for the jailbroken iDevices in late 2017 before Mozilla and Apple had made strides to mitigate the issue.
+SharedArrayBuffer objects had previously been used to shared data amongst threads however, in the advent of Spectre, was disabled entirely.
+These rudimentary patches only allowed the Javascript interpreter to use ArrayBuffers, which mitigated the risk of exposing sensitive data.
+In 2020, it was decided to re-enable shared memory and the changelog included that "postMessage() will no longer throw for SharedArrayBuffer objects and shared memory across threads will be available" \autocite{mozilla_2021}.
+However, this does not entirely fix the issue, as cross thread memory sharing could still result in data leaks.
+One avenue that could possibly patch this issue is by interleaving the data across multiple cores.
+It was noted that "branch prediction is not influenced by operations on other cores" \autocite[9]{SpectreAttacksExploiting} and thus spreading the data out could result in obfuscation.
+Performance would take a hit, however, as the CPU would need to spend extra cycles to pinpoint where in each cache per each CPU core.
+
+\section{Meltdown}
+
+Akin to Spectre, Meltdown exploits a microarchitectural vulnerability that executes instructions out-of-order.
+When the CPU is idling after finishing an instruction that requires monitoring, it uses that time to schedule future operations that will need to be executed.
+Instructions here can be run "in parallel as long as their results follow the architectural definition" \autocite[2]{MeltdownAnalysis}.
+Unfortunately, instructions that are loaded ahead of time do not have to abide by the same heavy restrictions of memory retrieval.
+This will allow unprivileged process to read memory regions that were not previously granted, such as kernel space memory.
+Operations can be conducted even "before the processor has committed the results of all prior instructions" \autocite[3]{MeltdownAnalysis}.
+These types of bugs are called Read after Write (RAW) and Write after Read (WAR), as data changes do not have enough time to propagate throughout code execution.
+Similar to how Spectre leaves the cache in an impartial state, data can be leaked through the means of side channels.
+
+\subsection{Address Space Mapping}
+
+To separate each process, the CPU will assign a unique address space to it, similar to how namespaces in programming languages work.
+This helps relive the processor from managing a monolithic structure by partitioning it into even blocks called pages.
+Each of these pages are subdivided into a user and kernel space.
+The latter space is needed for when "the CPU is running in privileged mode", such as accessing restricted memory regions \autocite[4]{MeltdownAnalysis}.
+Most operating systems will also map the entire contents of the kernel into each user process.
+In needing this space for data manipulation and other various operations, the entire physical memory is mapped into kernel space and typically are placed fixed addresses.
+To help mitigate this, kernel address space layout randomization (KASLR) was introduced, which changed where kernel data structures were loaded upon boot.
+
+\subsection{Possible Attack Ventures}
+
+To conduct an attack, first the adversary would lead the CPU into loading in desired memory that it does not have access to.
+Before the CPU can deny such request, it is speculating what the outcome will be if it is granted.
+In doing this, the address for the data is loaded into a register and will access a certain cache line based on the content retrieved.
+Using side-channel attacks, one could find data associated with the register and can effectively map all of kernel memory by repeating this process.
+Since the kernel maps all of physical memory in it's own address space, this can allow rouge processes to access sensitive data in other processes.
+This can be seen as a form of privilege escalation and works without assuming control of the kernel itself.
+In this state, the attacker still needs to be wary of KASLR, as the memory being siphoned is still randomized.
+However, "the randomization is limited to 40 bit(s)" which means one can "spray" the KASLR space and attempt to read a value from a tested address.
+If successful, all of physical memory can be read as usual. It should be noted that KASLR makes the Meltdown vulnerability less reliable.
+Theoretically, one could increase the rate of success if a kernel bug is discovered that compromises KASLR
+This could come in the form of leaking key addresses to kernel data structures or disabling it entirely.
+One iOS/MacOS bug resided in XNU's set\_dp\_control\_port() function, which left a dangling pointer to a Mach port.
+With this information, one "guess the page on which the kernel task port lives" \autocite{tim_1970}, defeating KASLR.
+
+\section{Operating System Mitigations}
+
+Most operating systems now have attempted to implement safety mechanisms in order for user and kernel spaces to act in isolation.
+As described above, each process is split down the middle to have unprivileged and privileged code execution.
+Before, both of these address spaces used the same lookup tables and could coexist peacefully.
+However, since shared memory between the kernel and user space is now dangerous, new methods of combating this have been created.
+Kernel address isolation to have side-channels efficiently removed (KAISER), is one such implementation.
+It designates two separate tables, where one is "for the user program that contains only locations for user memory" and the other is for the operating system \autocite[3]{SpectrePerformance}.
+In this, we attempt to limit the surface area of exposed kernel memory, lowering the chances of data being leaked.
+However, the cost for doing such is that the operating system needs to switch "between user and kernel mode becomes more expensive"  \autocite[3]{SpectrePerformance}
+Other means of mitigations have been proposed, such as adding return trampolines.
+This is when "dummy branch that has a return statement before the jump and call instruction to prevent branch target injection"  \autocite[3]{ijmsit526310}.
+This can help prevent conditional branch exploitation, as it prevents the CPU from easily being lead down a wrong path.
+
+\subsection{Performance after Mitigations}
+
+The new patches for both Spectre and Meltdown have seen performance decreases due to how they are implemented.
+IO (Input/Output) operations particularly have seen a significant hit.
+One mitigation introduced was to constantly clear the "memory lookup table cache" when accessing files on disk, which is an expensive operation.
+This attempts to not allow any information to reside in the cache, therefore minimizing the amount of data that can be leaked.
+While in theory it could be seen as a positive, the trade-offs have shown a "10-30\% (decrease)" in database applications \autocite[4]{ijmsit526310}
+
+\subsection{IO Patterns Worst Affected}
+
+Some IO operations will suffer more than others with these new patches unfortunately.
+Programs that utilize "meta-data operations" are most affected, as these include employing file open/close operations, permissions and file existence.
+One possible  way to alleviate this issue is by simply being more mindful of how many IO operations are needed.
+Any unnecessary file access should be completely avoided, however this is easier said than done.
+Companies like Ellexus have created software (Mistral) that can help locate where "bottlenecks and applications with bad I/O" \autocite[5]{SpectrePerformance}.
+These tools are helpful for enterprises that deal with millions of IO operations per second in their workflow, such as gas exploration or genome mapping.
+Other pieces of software in their suite can help identify "common issues such an application that has a high ratio of file opens to writes" \autocite[5]{SpectrePerformance}.
+Patterns derived from these tools can help software engineers to write better code to help alleviate this issue.
+
+\section{Summary}
+
+To conclude, Spectre and Meltdown are powerful hardware vulnerabilities present in most consumer and enterprise CPUs.
+Attacks are generally difficult to formulate and are highly specific in what data they wish to extract.
+These leaks are also not easily traceable, as they do not leave behind any evidence.
+However, the severity of these holes should not be understated and we are still feeling the effects years later.
+To properly and fully handle this issue, major chip manufactures need to add more security measures in speculative execution.
+This could be in the form of creating new instructions to "provide a barrier against speculative execution" \autocite[3]{ijmsit526310}.
+There is no such instruction present in Intel's ISA and speculative execution will occur regardless.
+Other types of proposals such as "return trampolines" have been proposed that can be retroactively applied to all affected chipsets.
+Patches in operating systems such as KAISER provide a temporary fix in separating user and kernel processes but add a performance penalty.
+User applications that involve several IO operations are the most affected due to frequent context switching and cache clearing.
+Some methodologies of working around this bottleneck have been proven to help mitigate the performance hit.
+
+\printbibliography
+
+\end{document}
